@@ -232,6 +232,17 @@ class BraveSearchClient:
         cleaned = COUNTRY_SUFFIX_PATTERN.sub("", cleaned).strip().rstrip(",.;:")
         return cleaned
 
+    def _company_in_snippet(self, snippet_text: str, company_name: str) -> bool:
+        if not snippet_text or not company_name.strip():
+            return False
+        padded = f" {snippet_text} "
+        variants = {
+            normalize_company_name(company_name),
+            normalize_company_name(company_name, remove_suffixes=True),
+            normalize_company_name(company_name, remove_suffixes=True, remove_articles=True),
+        }
+        return any(v and f" {v} " in padded for v in variants)
+
     def _snippet_match_mode(
         self,
         snippet_text: str,
@@ -241,7 +252,6 @@ class BraveSearchClient:
         state: str,
         country: str,
     ) -> str:
-        normalized_company = normalize_company_name(company_name)
         if self._addresses_equivalent(snippet_text, normalized_address):
             return "exact_address"
         location_hit = False
@@ -252,7 +262,7 @@ class BraveSearchClient:
             location_hit = True
         if location_hit and city and f" {city} " not in f" {snippet_text} ":
             location_hit = False
-        if location_hit and normalized_company:
+        if location_hit and self._company_in_snippet(snippet_text, company_name):
             return "state_country"
         return ""
 
@@ -313,6 +323,7 @@ class BraveSearchClient:
         seen_urls = set()
         last_error = ""
         debug_lines: List[str] = []
+        fallback_state_country: Optional[Tuple[str, str]] = None
         for query in queries:
             results, error = self._search(query)
             if error:
@@ -328,7 +339,19 @@ class BraveSearchClient:
                 snippet_text = normalize_address(f"{item.get('title', '')} {item.get('description', '')}")
                 debug_lines.append(f"url={url} snippet={snippet_text[:220]}")
                 if not _url_matches_accepted_domains(url, accepted_domain_list):
-                    debug_lines.append(f"skipped_non_accepted_domain={url}")
+                    external_mode = self._snippet_match_mode(
+                        snippet_text,
+                        normalized_address,
+                        company_name,
+                        city,
+                        state,
+                        country,
+                    )
+                    if external_mode == "state_country" and fallback_state_country is None:
+                        fallback_state_country = (url, "state_country")
+                        debug_lines.append(f"external_state_country_candidate={url}")
+                    else:
+                        debug_lines.append(f"skipped_non_accepted_domain={url}")
                     continue
                 if snippet_trust_enabled:
                     snippet_mode = self._snippet_match_mode(
@@ -383,4 +406,8 @@ class BraveSearchClient:
                 if snippet_mode:
                     debug_lines.append(f"snippet_match_post_page={snippet_mode} url={url}")
                     return url, snippet_mode, "", "\n".join(debug_lines)
+        if fallback_state_country:
+            url, mode = fallback_state_country
+            debug_lines.append(f"external_state_country_accepted={url}")
+            return url, mode, "", "\n".join(debug_lines)
         return None, "", last_error or "Live search did not find address or location evidence on the searched pages.", "\n".join(debug_lines)
