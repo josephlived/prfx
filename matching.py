@@ -115,6 +115,28 @@ def parse_address_evidence(text: str) -> List[AddressEvidence]:
     return entries
 
 
+def strip_netname_prefix(value: str) -> List[str]:
+    cleaned = value.strip()
+    if not cleaned:
+        return []
+    variants: List[str] = []
+    seen = set()
+
+    def add(candidate: str) -> None:
+        candidate = candidate.strip(" -_")
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            variants.append(candidate)
+
+    without_net = re.sub(r"^net[-_]", "", cleaned, flags=re.IGNORECASE)
+    add(without_net)
+    once_stripped = re.sub(r"^[A-Za-z]{2}[-_]", "", without_net, count=1)
+    add(once_stripped)
+    twice_stripped = re.sub(r"^[A-Za-z]{2}[-_]", "", once_stripped, count=1)
+    add(twice_stripped)
+    return variants
+
+
 def normalize_domain(value: str) -> str:
     lowered = value.strip().lower()
     lowered = re.sub(r"^https?://", "", lowered)

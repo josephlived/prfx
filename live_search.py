@@ -25,6 +25,38 @@ DIRECTION_TOKENS = {
     "southwest",
 }
 
+STREET_TYPE_TOKENS = {
+    "street",
+    "road",
+    "avenue",
+    "boulevard",
+    "drive",
+    "circle",
+    "parkway",
+    "center",
+    "suite",
+    "floor",
+    "highway",
+    "freeway",
+    "way",
+    "court",
+    "lane",
+    "place",
+    "terrace",
+    "trail",
+    "plaza",
+    "square",
+    "route",
+    "pike",
+    "turnpike",
+    "alley",
+    "row",
+}
+
+UNIT_DESIGNATOR_PATTERN = re.compile(
+    r"\b(?:suite|ste|floor|fl|unit|apt|apartment|room|rm|building|bldg)\s+\w{1,6}\b"
+)
+
 COUNTRY_SUFFIX_PATTERN = re.compile(
     r"[\s,]*(?:u\.?s\.?a?\.?|united states(?:\s+of\s+america)?)\.?\s*$",
     re.IGNORECASE,
@@ -188,6 +220,8 @@ class BraveSearchClient:
                 break
             if token in DIRECTION_TOKENS:
                 break
+            if token in STREET_TYPE_TOKENS:
+                break
             city_tokens.append(token)
             if len(city_tokens) == 2:
                 break
@@ -222,13 +256,26 @@ class BraveSearchClient:
             return "state_country"
         return ""
 
+    def _strip_unit_designators(self, text: str) -> str:
+        if not text:
+            return text
+        cleaned = UNIT_DESIGNATOR_PATTERN.sub(" ", text)
+        return re.sub(r"\s+", " ", cleaned).strip()
+
     def _addresses_equivalent(self, haystack_text: str, normalized_address: str) -> bool:
-        if normalized_address and normalized_address in haystack_text:
+        if not normalized_address:
+            return False
+        if normalized_address in haystack_text:
             return True
-        if normalized_address.endswith(" us"):
-            short_address = normalized_address[:-3].strip()
-            if short_address and short_address in haystack_text:
-                return True
+        short_address = normalized_address
+        if short_address.endswith(" us"):
+            short_address = short_address[:-3].strip()
+        if short_address and short_address in haystack_text:
+            return True
+        cleaned_haystack = self._strip_unit_designators(haystack_text)
+        cleaned_address = self._strip_unit_designators(short_address)
+        if cleaned_address and cleaned_address in cleaned_haystack:
+            return True
         return False
 
     def find_address_evidence(

@@ -17,6 +17,7 @@ from matching import (
     parse_alias_lines,
     parse_company_lines,
     parse_domain_lines,
+    strip_netname_prefix,
 )
 from models import CompanyCatalog, InputRow, ValidationResult, WhoisOnlyResult
 from domain_crawler import DomainEvidenceClient
@@ -148,7 +149,18 @@ def _run_whois_match(prefix: str, catalog: CompanyCatalog, whois_client: WhoisLo
     registry_display = record.registry
     if record.error:
         return "", "none", 0, org_display, net_display, domain_display, registry_display, f"WHOIS lookup failed: {record.error}"
-    matched_name, kind, score = _match_from_candidates(catalog, [*record.org_names, record.net_name])
+    candidates: List[str] = [*record.org_names, record.net_name]
+    for raw in [record.net_name, *record.org_names]:
+        candidates.extend(strip_netname_prefix(raw))
+    seen_candidates: set[str] = set()
+    deduped_candidates: List[str] = []
+    for candidate in candidates:
+        key = candidate.strip().lower()
+        if not key or key in seen_candidates:
+            continue
+        seen_candidates.add(key)
+        deduped_candidates.append(candidate)
+    matched_name, kind, score = _match_from_candidates(catalog, deduped_candidates)
     if kind == "exact":
         match_type = "whois_orgname_exact" if matched_name and any(
             normalize_company_name(name) == normalize_company_name(matched_name) or
