@@ -19,6 +19,19 @@ from whois_lookup import WhoisLookupClient
 st.set_page_config(page_title="Prefix Workbench", layout="wide")
 
 
+def _read_secret(name: str) -> str:
+    try:
+        if name in st.secrets:
+            return str(st.secrets[name] or "")
+    except Exception:
+        pass
+    return ""
+
+
+def _default_brave_api_key() -> str:
+    return _read_secret("BRAVE_SEARCH_API_KEY") or os.getenv("BRAVE_SEARCH_API_KEY", "")
+
+
 def _read_text_file(uploaded_file) -> str:
     return uploaded_file.getvalue().decode("utf-8-sig", errors="ignore")
 
@@ -190,9 +203,10 @@ with st.sidebar:
     )
     brave_search_api_key = st.text_input(
         "Brave Search API Key",
-        value=os.getenv("BRAVE_SEARCH_API_KEY", ""),
+        value=_default_brave_api_key(),
         type="password",
-        help="Optional live-search escalation for Standard Validator.",
+        help="Optional live-search escalation for Standard Validator. "
+             "Set BRAVE_SEARCH_API_KEY in Streamlit secrets or env to auto-load.",
     )
     address_book_text = st.text_area(
         "Known Address Evidence",
