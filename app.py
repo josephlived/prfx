@@ -201,13 +201,7 @@ with st.sidebar:
         placeholder="One domain per line, optionally: domain.com | Company Name",
         help="Global accepted domains used as supplemental WHOIS evidence now and as future crawl scope later.",
     )
-    brave_search_api_key = st.text_input(
-        "Brave Search API Key",
-        value=_default_brave_api_key(),
-        type="password",
-        help="Optional live-search escalation for Standard Validator. "
-             "Set BRAVE_SEARCH_API_KEY in Streamlit secrets or env to auto-load.",
-    )
+    brave_search_api_key = _default_brave_api_key()
     address_book_text = st.text_area(
         "Known Address Evidence",
         height=180,
