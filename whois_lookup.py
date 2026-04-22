@@ -1,0 +1,189 @@
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any, Iterable, List
+
+from models import WhoisRecord
+
+try:
+    from ipwhois import IPWhois  # type: ignore
+except ImportError:  # pragma: no cover
+    IPWhois = None
+
+
+def _collect_vcard_names(vcard: Iterable[Any]) -> List[str]:
+    names: List[str] = []
+    for item in vcard:
+        if not isinstance(item, list) or len(item) < 4:
+            continue
+        key = item[0]
+        value = item[3]
+        if key in {"fn", "org"} and isinstance(value, str):
+            names.append(value.strip())
+    return names
+
+
+def _collect_vcard_emails(vcard: Iterable[Any]) -> List[str]:
+    emails: List[str] = []
+    for item in vcard:
+        if not isinstance(item, list) or len(item) < 4:
+            continue
+        if item[0] == "email" and isinstance(item[3], str):
+            emails.append(item[3].strip())
+    return emails
+
+
+def _extract_org_names(rdap: dict[str, Any]) -> List[str]:
+    names: List[str] = []
+    network = rdap.get("network") or {}
+    if isinstance(network.get("name"), str):
+        names.append(network["name"])
+    objects = rdap.get("objects") or {}
+    for obj in objects.values():
+        if not isinstance(obj, dict):
+            continue
+        contact = obj.get("contact") or {}
+        if isinstance(contact.get("name"), str):
+            names.append(contact["name"])
+        vcard = contact.get("vcardArray")
+        if isinstance(vcard, list) and len(vcard) == 2 and isinstance(vcard[1], list):
+            names.extend(_collect_vcard_names(vcard[1]))
+        vcard = obj.get("vcardArray")
+        if isinstance(vcard, list) and len(vcard) == 2 and isinstance(vcard[1], list):
+            names.extend(_collect_vcard_names(vcard[1]))
+    unique = []
+    seen = set()
+    for name in names:
+        stripped = name.strip()
+        if stripped and stripped not in seen:
+            seen.add(stripped)
+            unique.append(stripped)
+    return unique
+
+
+def _extract_domains(rdap: dict[str, Any], org_names: List[str], net_name: str) -> List[str]:
+    candidates: List[str] = []
+    candidates.extend(org_names)
+    if net_name:
+        candidates.append(net_name)
+    network = rdap.get("network") or {}
+    if isinstance(network, dict):
+        for key in ("name", "handle"):
+            value = network.get(key)
+            if isinstance(value, str):
+                candidates.append(value)
+    objects = rdap.get("objects") or {}
+    for obj in objects.values():
+        if not isinstance(obj, dict):
+            continue
+        contact = obj.get("contact") or {}
+        for vcard in (contact.get("vcardArray"), obj.get("vcardArray")):
+            if isinstance(vcard, list) and len(vcard) == 2 and isinstance(vcard[1], list):
+                candidates.extend(_collect_vcard_emails(vcard[1]))
+    domains: List[str] = []
+    seen = set()
+    for candidate in candidates:
+        for domain in re.findall(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b", str(candidate).lower()):
+            if domain not in seen:
+                seen.add(domain)
+                domains.append(domain)
+    return domains
+
+
+def _extract_registry_name(rdap: dict[str, Any]) -> str:
+    for key in ("asn_registry", "nir"):
+        value = rdap.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().upper()
+    network = rdap.get("network") or {}
+    links = network.get("links") if isinstance(network, dict) else None
+    if isinstance(links, list):
+        for link in links:
+            if not isinstance(link, dict):
+                continue
+            href = str(link.get("href", "")).lower()
+            for registry_name in ("arin", "ripe", "apnic", "afrinic", "lacnic", "jpnic", "krnic"):
+                if registry_name in href:
+                    return registry_name.upper()
+    return ""
+
+
+class WhoisLookupClient:
+    def __init__(self, cache_dir: str | Path = "cache") -> None:
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_path = self.cache_dir / "whois_cache.json"
+
+    def _load_cache(self) -> dict[str, Any]:
+        if not self.cache_path.exists():
+            return {}
+        try:
+            return json.loads(self.cache_path.read_text(encoding="utf-8"))
+        except Exception:  # pragma: no cover
+            return {}
+
+    def _save_cache(self, cache_data: dict[str, Any]) -> None:
+        self.cache_path.write_text(json.dumps(cache_data, indent=2, ensure_ascii=True), encoding="utf-8")
+
+    def clear_cache(self) -> None:
+        if self.cache_path.exists():
+            self.cache_path.unlink()
+
+    def cache_stats(self) -> dict[str, Any]:
+        cache = self._load_cache()
+        return {
+            "entries": len(cache),
+            "path": str(self.cache_path),
+        }
+
+    def is_available(self) -> bool:
+        return IPWhois is not None
+
+    def lookup(self, prefix: str) -> WhoisRecord:
+        normalized_prefix = prefix.strip()
+        cache = self._load_cache()
+        cached_record = cache.get(normalized_prefix)
+        if isinstance(cached_record, dict):
+            return WhoisRecord(
+                prefix=normalized_prefix,
+                org_names=list(cached_record.get("org_names", [])),
+                net_name=str(cached_record.get("net_name", "")),
+                domains=list(cached_record.get("domains", [])),
+                source_url=str(cached_record.get("source_url", "")),
+                error=str(cached_record.get("error", "")),
+                cached=True,
+                registry=str(cached_record.get("registry", "")),
+            )
+        if IPWhois is None:
+            return WhoisRecord(prefix=normalized_prefix, error="ipwhois is not installed.")
+        base_ip = normalized_prefix.split("/", 1)[0].strip()
+        try:
+            rdap = IPWhois(base_ip).lookup_rdap(depth=1)
+            network = rdap.get("network") or {}
+            org_names = _extract_org_names(rdap)
+            net_name = ""
+            if isinstance(network.get("name"), str):
+                net_name = network["name"].strip()
+            domains = _extract_domains(rdap, org_names, net_name)
+            source_url = ""
+            if isinstance(rdap.get("nir"), str):
+                source_url = rdap["nir"]
+            record = WhoisRecord(
+                prefix=normalized_prefix,
+                org_names=org_names,
+                net_name=net_name,
+                domains=domains,
+                source_url=source_url,
+                registry=_extract_registry_name(rdap),
+            )
+            cache[normalized_prefix] = asdict(record)
+            self._save_cache(cache)
+            return record
+        except Exception as exc:  # pragma: no cover
+            record = WhoisRecord(prefix=normalized_prefix, error=str(exc))
+            cache[normalized_prefix] = asdict(record)
+            self._save_cache(cache)
+            return record
