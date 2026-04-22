@@ -145,7 +145,8 @@ def _run_whois_match(prefix: str, catalog: CompanyCatalog, whois_client: WhoisLo
     record = whois_client.lookup(prefix)
     org_display = "; ".join(record.org_names)
     net_display = record.net_name
-    domain_display = ", ".join(record.domains)
+    matching_domains = sorted({d for d in record.domains if d in catalog.accepted_domains})
+    domain_display = ", ".join(matching_domains)
     registry_display = record.registry
     if record.error:
         return "", "none", 0, org_display, net_display, domain_display, registry_display, f"WHOIS lookup failed: {record.error}"
@@ -168,9 +169,8 @@ def _run_whois_match(prefix: str, catalog: CompanyCatalog, whois_client: WhoisLo
             for name in record.org_names
         ) else "whois_netname_exact"
         return matched_name, match_type, score, org_display, net_display, domain_display, registry_display, ""
-    matching_domains = sorted(set(record.domains).intersection(catalog.accepted_domains))
     if matching_domains:
-        return "", "whois_domain_exact", 100, org_display, net_display, ", ".join(matching_domains), registry_display, ""
+        return "", "whois_domain_exact", 100, org_display, net_display, domain_display, registry_display, ""
     if score >= 97 and matched_name:
         return matched_name, "whois_close_not_exact", score, org_display, net_display, domain_display, registry_display, ""
     return "", "no_match", score, org_display, net_display, domain_display, registry_display, ""
