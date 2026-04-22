@@ -4,7 +4,7 @@ import json
 import re
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Iterable, List
+from typing import Any, Iterable, Iterator, List
 
 from models import WhoisRecord
 
@@ -12,6 +12,28 @@ try:
     from ipwhois import IPWhois  # type: ignore
 except ImportError:  # pragma: no cover
     IPWhois = None
+
+
+REGISTRY_DOMAIN_SUFFIXES = (
+    "arin.net",
+    "ripe.net",
+    "apnic.net",
+    "afrinic.net",
+    "lacnic.net",
+    "jpnic.net",
+    "krnic.net",
+    "twnic.tw",
+    "iana.org",
+    "icann.org",
+    "rdap.org",
+    "in-addr.arpa",
+    "ip6.arpa",
+)
+
+
+def _is_registry_domain(domain: str) -> bool:
+    domain = domain.lower().strip(".")
+    return any(domain == suffix or domain.endswith("." + suffix) for suffix in REGISTRY_DOMAIN_SUFFIXES)
 
 
 def _collect_vcard_names(vcard: Iterable[Any]) -> List[str]:
@@ -34,6 +56,47 @@ def _collect_vcard_emails(vcard: Iterable[Any]) -> List[str]:
         if item[0] == "email" and isinstance(item[3], str):
             emails.append(item[3].strip())
     return emails
+
+
+def _collect_vcard_urls(vcard: Iterable[Any]) -> List[str]:
+    urls: List[str] = []
+    for item in vcard:
+        if not isinstance(item, list) or len(item) < 4:
+            continue
+        if item[0] == "url" and isinstance(item[3], str):
+            urls.append(item[3].strip())
+    return urls
+
+
+def _collect_remarks_text(remarks: Any) -> List[str]:
+    texts: List[str] = []
+    if not isinstance(remarks, list):
+        return texts
+    for item in remarks:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title")
+        if isinstance(title, str):
+            texts.append(title)
+        description = item.get("description")
+        if isinstance(description, list):
+            for desc in description:
+                if isinstance(desc, str):
+                    texts.append(desc)
+        elif isinstance(description, str):
+            texts.append(description)
+    return texts
+
+
+def _walk_strings(node: Any) -> Iterator[str]:
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, dict):
+        for value in node.values():
+            yield from _walk_strings(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _walk_strings(item)
 
 
 def _extract_org_names(rdap: dict[str, Any]) -> List[str]:
@@ -75,6 +138,7 @@ def _extract_domains(rdap: dict[str, Any], org_names: List[str], net_name: str) 
             value = network.get(key)
             if isinstance(value, str):
                 candidates.append(value)
+        candidates.extend(_collect_remarks_text(network.get("remarks")))
     objects = rdap.get("objects") or {}
     for obj in objects.values():
         if not isinstance(obj, dict):
@@ -83,13 +147,24 @@ def _extract_domains(rdap: dict[str, Any], org_names: List[str], net_name: str) 
         for vcard in (contact.get("vcardArray"), obj.get("vcardArray")):
             if isinstance(vcard, list) and len(vcard) == 2 and isinstance(vcard[1], list):
                 candidates.extend(_collect_vcard_emails(vcard[1]))
+                candidates.extend(_collect_vcard_urls(vcard[1]))
+        candidates.extend(_collect_remarks_text(obj.get("remarks")))
+    candidates.extend(_walk_strings(rdap))
     domains: List[str] = []
     seen = set()
+
+    def _add_domain(value: str) -> None:
+        value = value.strip(".")
+        if not value or value in seen or _is_registry_domain(value):
+            return
+        seen.add(value)
+        domains.append(value)
+
     for candidate in candidates:
         for domain in re.findall(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b", str(candidate).lower()):
-            if domain not in seen:
-                seen.add(domain)
-                domains.append(domain)
+            _add_domain(domain)
+            if domain.startswith("www."):
+                _add_domain(domain[4:])
     return domains
 
 
