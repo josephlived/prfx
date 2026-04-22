@@ -14,6 +14,22 @@ from matching import normalize_address, normalize_company_name, normalize_domain
 USER_AGENT = "PrefixWorkbench/1.0 (+https://local.app)"
 SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 
+DIRECTION_TOKENS = {
+    "north",
+    "south",
+    "east",
+    "west",
+    "northeast",
+    "northwest",
+    "southeast",
+    "southwest",
+}
+
+COUNTRY_SUFFIX_PATTERN = re.compile(
+    r"[\s,]*(?:u\.?s\.?a?\.?|united states(?:\s+of\s+america)?)\.?\s*$",
+    re.IGNORECASE,
+)
+
 
 def _url_matches_accepted_domains(url: str, accepted_domains: Iterable[str]) -> bool:
     accepted = [normalize_domain(domain) for domain in accepted_domains if normalize_domain(domain)]
@@ -156,9 +172,10 @@ class BraveSearchClient:
         tokens = normalized.split()
         if not tokens:
             return ""
+        search_tokens = tokens[:-1] if tokens[-1] == "us" else tokens
         state_index = -1
-        for index in range(len(tokens) - 1, -1, -1):
-            token = tokens[index]
+        for index in range(len(search_tokens) - 1, -1, -1):
+            token = search_tokens[index]
             if len(token) == 2 and token.isalpha():
                 state_index = index
                 break
@@ -166,13 +183,20 @@ class BraveSearchClient:
             return ""
         city_tokens: List[str] = []
         for index in range(state_index - 1, -1, -1):
-            token = tokens[index]
+            token = search_tokens[index]
             if token.isdigit():
+                break
+            if token in DIRECTION_TOKENS:
                 break
             city_tokens.append(token)
             if len(city_tokens) == 2:
                 break
         return " ".join(reversed(city_tokens)).strip()
+
+    def _address_query_variant(self, address: str) -> str:
+        cleaned = address.strip().rstrip(",.;: ")
+        cleaned = COUNTRY_SUFFIX_PATTERN.sub("", cleaned).strip().rstrip(",.;:")
+        return cleaned
 
     def _snippet_match_mode(
         self,
@@ -221,12 +245,24 @@ class BraveSearchClient:
         normalized_company = normalize_company_name(company_name)
         state, country = self._location_tokens(address)
         city = self._city_tokens(address)
-        queries = []
+        address_variant = self._address_query_variant(address)
+        queries: List[str] = []
+        seen_queries: set[str] = set()
+
+        def _add_query(query: str) -> None:
+            if query and query not in seen_queries:
+                seen_queries.add(query)
+                queries.append(query)
+
         if company_name.strip():
-            queries.append(f"\"{company_name}\" \"{address}\"")
+            _add_query(f"\"{company_name}\" \"{address}\"")
+            if address_variant:
+                _add_query(f"\"{company_name}\" \"{address_variant}\"")
             if city and state:
-                queries.append(f"\"{company_name}\" \"{city}\" \"{state}\"")
-        queries.append(f"\"{address}\"")
+                _add_query(f"\"{company_name}\" \"{city}\" \"{state}\"")
+        _add_query(f"\"{address}\"")
+        if address_variant:
+            _add_query(f"\"{address_variant}\"")
         seen_urls = set()
         last_error = ""
         debug_lines: List[str] = []
